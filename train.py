@@ -84,12 +84,12 @@ def too_simple_net(args={}):
 def too_simple_net_ae(args={}):
     l_in = InputLayer( (None, 1, 28, 28) )
     l_in = GaussianNoiseLayer(l_in)
-    l_conv = Conv2DLayer(l_in, num_filters=32, filter_size=3)
+    l_conv = Conv2DLayer(l_in, num_filters=64, filter_size=7, nonlinearity=softplus)
     l_conv = Pool2DLayer(l_conv, pool_size=2, mode='average_inc_pad')
-    l_conv = Conv2DLayer(l_conv, num_filters=48, filter_size=3)
-    l_conv = Pool2DLayer(l_conv, pool_size=2, mode='average_inc_pad')
-    l_conv = Conv2DLayer(l_conv, num_filters=64, filter_size=3)
-    l_conv = DenseLayer(l_conv, num_units=256)
+    #l_conv = Conv2DLayer(l_conv, num_filters=48, filter_size=3, nonlinearity=softplus)
+    #l_conv = Pool2DLayer(l_conv, pool_size=2, mode='average_inc_pad')
+    #l_conv = Conv2DLayer(l_conv, num_filters=64, filter_size=3, nonlinearity=softplus)
+    #l_conv = DenseLayer(l_conv, num_units=256, nonlinearity=softplus)
     for layer in get_all_layers(l_conv)[::-1]:
         if isinstance(layer, InputLayer):
             break
@@ -119,8 +119,13 @@ def get_net(net_cfg, args={"lambda":0.5}):
     X = T.tensor4('X')
     b_prime = theano.shared( np.ones( (1, 28, 28) ) )
     net_out = get_output(l_out, X)
-    energy = args["lambda"]*((b_prime - X)**2).sum(axis=[1,2,3]).mean() - (net_out**2).sum(axis=[1,2,3]).mean()
-    loss = ((-T.grad(energy, X))**2).sum(axis=[1,2,3]).mean()
+    energy = args["lambda"]*((b_prime - X)**2).sum(axis=[1,2,3]).mean() - net_out.sum(axis=[1,2,3]).mean()
+
+    # reconstruction
+    fx = X - T.grad(energy, X)
+    
+    loss = ((X-fx)**2).sum(axis=[1,2,3]).mean()
+
     params = get_all_params(l_out, trainable=True)
     params += [b_prime]
     lr = theano.shared(floatX(args["learning_rate"]))
@@ -128,7 +133,15 @@ def get_net(net_cfg, args={"lambda":0.5}):
     #updates = rmsprop(loss, params, learning_rate=0.01)
     train_fn = theano.function([X], [loss,energy], updates=updates)
     energy_fn = theano.function([X], energy)
-    return {"train_fn": train_fn, "energy_fn": energy_fn, "lr": lr, "b_prime": b_prime, "l_out": l_out}
+    out_fn = theano.function([X], net_out)
+    
+    return {
+        "train_fn": train_fn,
+        "energy_fn": energy_fn,
+        "lr": lr,
+        "b_prime": b_prime,
+        "l_out": l_out
+    }
 
 def iterate(X_train, bs=32):
     b = 0
@@ -147,7 +160,7 @@ def train(cfg, data, num_epochs, out_file, sched={}, batch_size=32):
     #train_losses = []
     lr = cfg["lr"]
     with open(out_file, "wb") as f:
-        f.write("epoch,loss\n")
+        f.write("epoch,loss,avg_base_energy,avg_anom_energy\n")
         for epoch in range(0, num_epochs):
             if epoch+1 in sched:
                 lr.set_value( floatX(sched[epoch+1]) )
@@ -225,11 +238,11 @@ if __name__ == "__main__":
     data = three_vs_seven()
     X_train_three, X_train_seven, X_valid_three, X_valid_seven = data
     prefix = "three_vs_seven/modest-net-twoconv_lr0.01_157k.txt"
-    lamb=1.0
-    cfg = get_net(too_simple_net_ae, {"learning_rate": 0.01, "nonlinearity":rectify, "lambda":lamb})
-    train(cfg, data, num_epochs=300, out_file=prefix)
+    lamb=0.5
+    cfg = get_net(too_simple_net_ae, {"learning_rate": 0.01, "lambda":lamb})
+    train(cfg, data, num_epochs=200, out_file=prefix)
     #collect the energies
-    cfg = get_net(too_simple_net_ae, {"learning_rate": 0.01, "nonlinearity":rectify, "lambda":lamb})
+    cfg = get_net(too_simple_net_ae, {"learning_rate": 0.01, "lambda":lamb})
     with open("%s.model" % prefix) as g:
         model = pickle.load(g)
         set_all_param_values(cfg["l_out"], model[0])
