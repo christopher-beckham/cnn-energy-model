@@ -131,12 +131,12 @@ def get_net(net_cfg, args={"lambda":0.5}):
     
     # reconstruction
     fx = x_noise - T.grad(energy, x_noise)
-    #loss = ((X-fx)**2).sum(axis=[1,2,3]).mean()
+    loss = ((X-fx)**2).sum(axis=[1,2,3]).mean()
 
-    loss = squared_error(net_out,X).mean()
+    #loss = squared_error(net_out,X).mean()
     
     params = get_all_params(l_out, trainable=True)
-    #params += [b_prime]
+    params += [b_prime]
     lr = theano.shared(floatX(args["learning_rate"]))
     updates = nesterov_momentum(loss, params, learning_rate=lr, momentum=0.9)
     #updates = rmsprop(loss, params, learning_rate=lr)
