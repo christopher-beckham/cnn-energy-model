@@ -9,7 +9,11 @@ from lasagne.utils import *
 import numpy as np
 import cPickle as pickle
 import gzip
+
+import matplotlib
+matplotlib.use('agg')
 import matplotlib.pyplot as plt
+
 import os
 import sys
 
@@ -83,23 +87,27 @@ def too_simple_net(args={}):
 
 def too_simple_net_ae(args={}):
     l_in = InputLayer( (None, 1, 28, 28) )
-    l_in = GaussianNoiseLayer(l_in)
-    l_conv = Conv2DLayer(l_in, num_filters=64, filter_size=7, nonlinearity=softplus)
+    l_noise = GaussianNoiseLayer(l_in)
+    l_conv = Conv2DLayer(l_noise, num_filters=32, filter_size=3, nonlinearity=softplus)
     l_conv = Pool2DLayer(l_conv, pool_size=2, mode='average_inc_pad')
-    #l_conv = Conv2DLayer(l_conv, num_filters=48, filter_size=3, nonlinearity=softplus)
-    #l_conv = Pool2DLayer(l_conv, pool_size=2, mode='average_inc_pad')
-    #l_conv = Conv2DLayer(l_conv, num_filters=64, filter_size=3, nonlinearity=softplus)
-    #l_conv = DenseLayer(l_conv, num_units=256, nonlinearity=softplus)
+    l_conv = Conv2DLayer(l_conv, num_filters=48, filter_size=3, nonlinearity=softplus)
+    l_conv = Pool2DLayer(l_conv, pool_size=2, mode='average_inc_pad')
+    l_conv = Conv2DLayer(l_conv, num_filters=64, filter_size=3, nonlinearity=softplus)
+    l_conv = DenseLayer(l_conv, num_units=256, nonlinearity=softplus)
     for layer in get_all_layers(l_conv)[::-1]:
         if isinstance(layer, InputLayer):
             break
         l_conv = InverseLayer(l_conv, layer)
 
+    #l_conv = NonlinearityLayer(l_conv, nonlinearity=sigmoid)
+
     for layer in get_all_layers(l_conv):
         print layer, layer.output_shape
     print count_params(layer)
+
+    l_out = l_conv
     
-    return l_conv
+    return l_noise, l_out
 
 
 
@@ -115,22 +123,23 @@ def too_simple_net_ae(args={}):
 # -----------------------------------
 
 def get_net(net_cfg, args={"lambda":0.5}):
-    l_out = net_cfg(args)
+    l_noise, l_out = net_cfg(args)
     X = T.tensor4('X')
     b_prime = theano.shared( np.ones( (1, 28, 28) ) )
-    net_out = get_output(l_out, X)
-    energy = args["lambda"]*((b_prime - X)**2).sum(axis=[1,2,3]).mean() - net_out.sum(axis=[1,2,3]).mean()
-
-    # reconstruction
-    fx = X - T.grad(energy, X)
+    x_noise, net_out = get_output([l_noise,l_out], X)
+    energy = args["lambda"]*((x_noise-b_prime)**2).sum(axis=[1,2,3]).mean() - net_out.sum(axis=[1,2,3]).mean()
     
-    loss = ((X-fx)**2).sum(axis=[1,2,3]).mean()
+    # reconstruction
+    fx = x_noise - T.grad(energy, x_noise)
+    #loss = ((X-fx)**2).sum(axis=[1,2,3]).mean()
 
+    loss = squared_error(net_out,X).mean()
+    
     params = get_all_params(l_out, trainable=True)
-    params += [b_prime]
+    #params += [b_prime]
     lr = theano.shared(floatX(args["learning_rate"]))
     updates = nesterov_momentum(loss, params, learning_rate=lr, momentum=0.9)
-    #updates = rmsprop(loss, params, learning_rate=0.01)
+    #updates = rmsprop(loss, params, learning_rate=lr)
     train_fn = theano.function([X], [loss,energy], updates=updates)
     energy_fn = theano.function([X], energy)
     out_fn = theano.function([X], net_out)
@@ -138,6 +147,7 @@ def get_net(net_cfg, args={"lambda":0.5}):
     return {
         "train_fn": train_fn,
         "energy_fn": energy_fn,
+        "out_fn": out_fn,
         "lr": lr,
         "b_prime": b_prime,
         "l_out": l_out
@@ -155,6 +165,7 @@ def train(cfg, data, num_epochs, out_file, sched={}, batch_size=32):
     train_fn = cfg["train_fn"]
     energy_fn = cfg["energy_fn"]
     b_prime = cfg["b_prime"]
+    out_fn = cfg["out_fn"]
     X_train_nothing, X_train_anomaly, X_valid_nothing, X_valid_anomaly = data
     idxs = [x for x in range(0, X_train_nothing.shape[0])]
     #train_losses = []
@@ -167,8 +178,10 @@ def train(cfg, data, num_epochs, out_file, sched={}, batch_size=32):
                 sys.stderr.write("changing learning rate to: %f\n" % sched[epoch+1])
             np.random.shuffle(idxs)
             X_train_nothing = X_train_nothing[idxs]
+
             losses = []
             energies = []
+
             for X_batch in iterate(X_train_nothing, bs=batch_size):
                 this_loss, this_energy = train_fn(X_batch)
                 losses.append(this_loss)
@@ -178,10 +191,23 @@ def train(cfg, data, num_epochs, out_file, sched={}, batch_size=32):
             for X_batch in iterate(X_train_anomaly, bs=batch_size):
                 this_energy = energy_fn(X_batch)
                 anomaly_energies.append(this_energy)
+
+            # plot one image from the validation set
+            img_orig = X_valid_nothing[0:1]
+            img_reconstruct = out_fn(img_orig)[0][0]
+            plt.subplot(121)
+            plt.imshow(img_orig[0][0], cmap="gray" )
+            plt.subplot(122)
+            plt.imshow(img_reconstruct, cmap="gray" )
+            plt.savefig('%s/%i.png' % (os.path.dirname(out_file), epoch))
                 
             print epoch+1, np.mean(losses), np.mean(energies), np.mean(anomaly_energies)
-            #train_losses.append(np.mean(losses))
             f.write("%i,%f,%f,%f\n" % (epoch+1, np.mean(losses), np.mean(energies), np.mean(anomaly_energies)))
+
+            
+
+
+            
     with open("%s.model" % out_file, "wb") as f:
         pickle.dump([ get_all_param_values(cfg["l_out"]), b_prime.get_value()], f, pickle.HIGHEST_PROTOCOL)
             
