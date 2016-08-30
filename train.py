@@ -87,8 +87,7 @@ def too_simple_net(args={}):
 
 def too_simple_net_ae(args={}):
     l_in = InputLayer( (None, 1, 28, 28) )
-    l_noise = GaussianNoiseLayer(l_in)
-    l_conv = Conv2DLayer(l_noise, num_filters=32, filter_size=3, nonlinearity=softplus)
+    l_conv = Conv2DLayer(l_in, num_filters=32, filter_size=3, nonlinearity=softplus)
     l_conv = Pool2DLayer(l_conv, pool_size=2, mode='average_inc_pad')
     l_conv = Conv2DLayer(l_conv, num_filters=48, filter_size=3, nonlinearity=softplus)
     l_conv = Pool2DLayer(l_conv, pool_size=2, mode='average_inc_pad')
@@ -99,7 +98,24 @@ def too_simple_net_ae(args={}):
             break
         l_conv = InverseLayer(l_conv, layer)
 
-    #l_conv = NonlinearityLayer(l_conv, nonlinearity=sigmoid)
+    for layer in get_all_layers(l_conv):
+        print layer, layer.output_shape
+    print count_params(layer)
+
+    l_out = l_conv
+    
+    return l_out
+
+
+def author_net(args={}):
+    l_in = InputLayer((None, 1, 28, 28))
+    l_conv = Conv2DLayer(l_in, num_filters=128, filter_size=7, nonlinearity=softplus)
+    l_conv = Pool2DLayer(l_conv, 2, mode='average_inc_pad')
+    l_conv = DenseLayer(l_conv, args["h"], nonlinearity=softplus)
+    for layer in get_all_layers(l_conv)[::-1]:
+        if isinstance(layer, InputLayer):
+            break
+        l_conv = InverseLayer(l_conv, layer)
 
     for layer in get_all_layers(l_conv):
         print layer, layer.output_shape
@@ -107,11 +123,7 @@ def too_simple_net_ae(args={}):
 
     l_out = l_conv
     
-    return l_noise, l_out
-
-
-
-
+    return l_out
 
 
 
@@ -122,27 +134,36 @@ def too_simple_net_ae(args={}):
 
 # -----------------------------------
 
-def get_net(net_cfg, args={"lambda":0.5}):
-    l_noise, l_out = net_cfg(args)
-    X = T.tensor4('X')
-    b_prime = theano.shared( np.ones( (1, 28, 28) ) )
-    x_noise, net_out = get_output([l_noise,l_out], X)
-    energy = args["lambda"]*((x_noise-b_prime)**2).sum(axis=[1,2,3]).mean() - net_out.sum(axis=[1,2,3]).mean()
-    
-    # reconstruction
-    fx = x_noise - T.grad(energy, x_noise)
-    loss = ((X-fx)**2).sum(axis=[1,2,3]).mean()
 
-    #loss = squared_error(net_out,X).mean()
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+srng = RandomStreams(123)
+
+def get_net(net_cfg, args={"lambda":0.5}):
+    l_out = net_cfg(args)
+
+    X = T.tensor4('X')
+    X_noise = X + srng.normal(X.shape, std=1.)
+    b_prime = theano.shared( np.zeros( (1, 28, 28) ) )
+    net_out = get_output(l_out, X)
+    net_out_noise = get_output(l_out, X_noise)
+    energy = args["lambda"]*((X-b_prime)**2).sum() - net_out.sum()
+    energy_noise = args["lambda"]*((X_noise-b_prime)**2).sum() - net_out_noise.sum()
+    # reconstruction
+    fx = X - T.grad(energy, X)
+    fx_noise = X_noise - T.grad(energy_noise, X_noise)
+    loss = ((X-fx_noise)**2).sum(axis=[1,2,3]).mean()
+
+    
     
     params = get_all_params(l_out, trainable=True)
     params += [b_prime]
     lr = theano.shared(floatX(args["learning_rate"]))
-    updates = nesterov_momentum(loss, params, learning_rate=lr, momentum=0.9)
+    #updates = nesterov_momentum(loss, params, learning_rate=lr, momentum=0.9)
+    updates = adadelta(loss, params, learning_rate=lr)
     #updates = rmsprop(loss, params, learning_rate=lr)
     train_fn = theano.function([X], [loss,energy], updates=updates)
     energy_fn = theano.function([X], energy)
-    out_fn = theano.function([X], net_out)
+    out_fn = theano.function([X], fx)
     
     return {
         "train_fn": train_fn,
@@ -192,6 +213,10 @@ def train(cfg, data, num_epochs, out_file, sched={}, batch_size=32):
                 this_energy = energy_fn(X_batch)
                 anomaly_energies.append(this_energy)
 
+            #valid_losses = []
+            #for X_batch in iterate(X_valid_nothing, bs=batch_size):
+            #    this_loss, _ = 
+
             # plot one image from the validation set
             img_orig = X_valid_nothing[0:1]
             img_reconstruct = out_fn(img_orig)[0][0]
@@ -228,47 +253,18 @@ def save_array(arr, filename, header):
             f.write("%f\n" % elem)
         
 if __name__ == "__main__":
-
-    # ------------
-    # EXPERIMENT 1
-    # ------------
-    #data = nonzero_vs_zero()
-    #print X_train_notzeros.shape, X_train_zeros.shape
-    #cfg = get_net(modest_net, {"learning_rate": 0.01})
-    #train(cfg, data, num_epochs=50, out_file="output/modest-net_lr0.01_sched_157k.txt", sched={26: 0.001})
-
-    # ------------
-    # EXPERIMENT 2
-    # ------------
-    """
-    data = three_vs_seven()
-    X_train_three, X_train_seven, X_valid_three, X_valid_seven = data
-    prefix = "three_vs_seven/modest-net_lr0.01_157k.txt"
-    #cfg = get_net(modest_net, {"learning_rate": 0.01})
-    #train(cfg, data, num_epochs=100, out_file=prefix)
-    #collect the energies
-    cfg = get_net(modest_net, {"learning_rate": 0.01})
-    with open("%s.model" % prefix) as g:
-        set_all_param_values(cfg["l_out"], pickle.load(g))
-    three_train, seven_train, three_valid, seven_valid = get_energies(cfg, data)
-    save_array(three_train, "%s.a.csv" % prefix, "three_train")
-    save_array(seven_train, "%s.b.csv" % prefix, "seven_train")
-    save_array(three_valid, "%s.c.csv" % prefix, "three_valid")
-    save_array(seven_valid, "%s.d.csv" % prefix, "seven_valid")
-    """
-
     
     # ------------
     # EXPERIMENT 2
     # ------------
     data = three_vs_seven()
     X_train_three, X_train_seven, X_valid_three, X_valid_seven = data
-    prefix = "three_vs_seven/modest-net-twoconv_lr0.01_157k.txt"
+    prefix = "three_vs_seven/author_net_512h.txt"
     lamb=0.5
-    cfg = get_net(too_simple_net_ae, {"learning_rate": 0.01, "lambda":lamb})
-    train(cfg, data, num_epochs=200, out_file=prefix)
+    cfg = get_net(author_net, {"learning_rate": 0.1, "lambda":lamb, "h":512})
+    train(cfg, data, num_epochs=1000, out_file=prefix, batch_size=128)
     #collect the energies
-    cfg = get_net(too_simple_net_ae, {"learning_rate": 0.01, "lambda":lamb})
+    cfg = get_net(author_net, {"learning_rate": 0.1, "lambda":lamb, "h":512})
     with open("%s.model" % prefix) as g:
         model = pickle.load(g)
         set_all_param_values(cfg["l_out"], model[0])
